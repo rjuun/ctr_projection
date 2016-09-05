@@ -1,7 +1,3 @@
--- Function: ctr_projection.f_contract_projection_maintenance()
-
--- DROP FUNCTION ctr_projection.f_contract_projection_maintenance();
-
 CREATE OR REPLACE FUNCTION ctr_projection.f_contract_projection_maintenance()
   RETURNS TABLE(exercise character varying, exercise_type character varying, step_1 character varying, step_2 character varying, budget_date date, year integer, month integer, country character varying, unit character varying, line_id integer, portfolio_concept character varying, agaap_rprt character varying, bdgt_agaap_1 character varying, bdgt_agaap_2 character varying, bdgt_agaap_3 character varying, product_group character varying, product_code_desc character varying, opex_capex_id_desc character varying, gl integer, gl_number_desc character varying, dummy_contract character varying, account_contract_number character varying, module_code text, product_code text, start_date date, maturity_date date, interest_date character varying, interest_nominal_rate double precision, collateral character varying, component character varying, currency character varying, amount_lcy double precision, customer_number character varying, customer_name character varying, country_residence character varying, industry_code integer, customer_category character varying, bb_group character varying, bank character varying, internal_rating character varying, economic_activity smallint, oenb_id integer, oenb_group_id integer, bs_thous_lcy double precision, pnl_thous_lcy double precision, pnl_ytd_thous_lcy double precision) AS
 $BODY$
@@ -12,15 +8,30 @@ $BODY$
 
 
 
+-- this cte transforms the f_calc_maintenance_contracts in the same format as t_injection_std_contracts
+--
 
-with multiple_maintenance_contracts AS						-- this subquery builds on the maintenance_contracts and multiply them by the necessary injection quantity
+WITH	cte_injection_std_contracts AS
 	(
-	
-		with maintenance_contracts AS					-- this subquery builds on the std_ contract_structure and add the instalments flow
-			(
+	SELECT
+		 country
+		,year AS start_budget_year
+		,month AS start_budget_month
+		,std_product_code::character varying
+		,CASE
+			WHEN maintenance_contracts = 0	THEN NULL
+			ELSE maintenance_contracts
+		END AS std_contracts_maintenance
+	FROM
+		ctr_projection.f_calc_maintenance_contracts()
+	)
 
-				with std_contract_structure AS			-- this is the subquery where the basic "date" structure for std_contract is defined
-					(
+
+-- this is the cte where the basic "date" structure for std_contract is defined
+---- 
+
+	,cte_std_contract_structure AS
+	(
 
 						SELECT
 							 t_std_contracts.agaap_rprt
@@ -35,7 +46,7 @@ with multiple_maintenance_contracts AS						-- this subquery builds on the maint
 							,t_std_contracts.product_code
 							,t_std_contracts.funding
 							,t_std_contracts.currency
-							,t_injection_std_contracts.*
+							,cte_injection_std_contracts.*
 							,t_std_contracts.principal
 							,t_std_contracts.maturity
 							,t_std_contracts.repayment_schedule
@@ -45,19 +56,27 @@ with multiple_maintenance_contracts AS						-- this subquery builds on the maint
 				-- To create the series of budget_dates for which a contract will have outstanding principal, we select the initial date of the series as the concatenation of start_budget_year and  start_budget_month
 				-- The end date of the series will be the same code of the initial date plus the number of months the standard contract has.
 				-- At the moment it is hard coded as 24 Months, but needs to become floating to represent any contract registered in t_std_contracts
+
+				-- So, this is where we need to substitute the table cte_injection_std_contracts by our new f_calc_maintenance_contracts
+				-- will we be able to do this thing that, for the first_year, we insert the contracts as "maintenance" but for years ahead it actually comes as "contractual_maintenance" ?
+
+
+
+
+				
 							,generate_series(
 									 to_date(
-										 (t_injection_std_contracts.start_budget_year::text || ' ' || t_injection_std_contracts.start_budget_month::text || ' ' || '15'), 'YYYY-MM-DD')
+										 (cte_injection_std_contracts.start_budget_year::text || ' ' || cte_injection_std_contracts.start_budget_month::text || ' ' || '15'), 'YYYY-MM-DD')
 									,to_date(
-										 (t_injection_std_contracts.start_budget_year::text || ' ' || t_injection_std_contracts.start_budget_month::text || ' ' || '15'), 'YYYY-MM-DD') + interval '24 Months', interval '1 Month')::date
+										 (cte_injection_std_contracts.start_budget_year::text || ' ' || cte_injection_std_contracts.start_budget_month::text || ' ' || '15'), 'YYYY-MM-DD') + interval '24 Months', interval '1 Month')::date
 							AS budget_date
 
 							, to_date(
-								(t_injection_std_contracts.start_budget_year::text || ' ' || t_injection_std_contracts.start_budget_month::text || ' ' || '15'), 'YYYY-MM-DD')::date
+								(cte_injection_std_contracts.start_budget_year::text || ' ' || cte_injection_std_contracts.start_budget_month::text || ' ' || '15'), 'YYYY-MM-DD')::date
 							AS start_date
 								
 							,(to_date(
-								(t_injection_std_contracts.start_budget_year::text || ' ' || t_injection_std_contracts.start_budget_month::text || ' ' || '15'), 'YYYY-MM-DD') + interval '24 Months')::date
+								(cte_injection_std_contracts.start_budget_year::text || ' ' || cte_injection_std_contracts.start_budget_month::text || ' ' || '15'), 'YYYY-MM-DD') + interval '24 Months')::date
 							AS maturity_date
 
 							
@@ -69,14 +88,20 @@ with multiple_maintenance_contracts AS						-- this subquery builds on the maint
 							AS	principal_instalment
 					
 						FROM
-							ctr_projection.t_injection_std_contracts
+							cte_injection_std_contracts
 							JOIN  ctr_projection.t_std_contracts ON
-							t_injection_std_contracts.std_product_code = t_std_contracts.std_product_code
-					)
+							cte_injection_std_contracts.std_product_code = t_std_contracts.std_product_code
 
-				SELECT 
+
+	)
+
+
+-- this subquery builds on the std_ contract_structure and add the instalments flow
+-- 
+	,cte_maintenance_contracts AS
+	(
+	SELECT
 					*
-
 				-- For each budget_date, whenever the number of months between start_date and budget_date is a (integer) multiple of the repayment_schedule, return difference between start_date and budget_date divided by repayment_schedule.
 				-- Rounddown should work for making the integer value
 					,trunc((((DATE_PART('year', budget_date) - DATE_PART('year', start_date)) * 12 + (DATE_PART('month', budget_date) - DATE_PART('month', start_date)))/repayment_schedule)::numeric,0)
@@ -86,22 +111,24 @@ with multiple_maintenance_contracts AS						-- this subquery builds on the maint
 					AS outstanding_principal
 				
 				FROM
-					std_contract_structure
+					cte_std_contract_structure
+	)
 
-			)
 
 
-	
-
-		SELECT 
+-- this subquery builds on the maintenance_contracts and multiply them by the necessary injection quantity
+--
+	,cte_multiple_maintenance_contracts AS
+	(
+	SELECT 
 			 
-			 maintenance_contracts.*
-			,(maintenance_contracts.country || '_' || product_code || '_M_'|| maintenance_contracts.start_budget_year || '_' || maintenance_contracts.start_budget_month || '_'|| multiplier) AS account_contract_number
+			 cte_maintenance_contracts.*
+			,(cte_maintenance_contracts.country || '_' || product_code || '_M_'|| cte_maintenance_contracts.start_budget_year || '_' || cte_maintenance_contracts.start_budget_month || '_'|| multiplier) AS account_contract_number
 			,NULL::double precision AS pnl_thous_lcy
 			,NULL::double precision AS pnl_ytd_thous_lcy
 			
 		FROM
-			maintenance_contracts  
+			cte_maintenance_contracts  
 			LEFT JOIN
 				(
 				SELECT
@@ -118,14 +145,18 @@ with multiple_maintenance_contracts AS						-- this subquery builds on the maint
 			) AS contract_multiplier
 
 			ON	(
-					contract_multiplier.country 		= maintenance_contracts.country
-				AND	contract_multiplier.std_product_code	= maintenance_contracts.std_product_code
-				AND	contract_multiplier.start_budget_year	= maintenance_contracts.start_budget_year
-				AND	contract_multiplier.start_budget_month	= maintenance_contracts.start_budget_month
+					contract_multiplier.country 		= cte_maintenance_contracts.country
+				AND	contract_multiplier.std_product_code	= cte_maintenance_contracts.std_product_code
+				AND	contract_multiplier.start_budget_year	= cte_maintenance_contracts.start_budget_year
+				AND	contract_multiplier.start_budget_month	= cte_maintenance_contracts.start_budget_month
 				)
 			WHERE
 				std_contracts_maintenance IS NOT NULL	
-	)
+	)			
+
+			
+
+
 
 SELECT
 
@@ -134,44 +165,44 @@ SELECT
 	 ,'Realistic'::character varying			AS	exercise_type			                           
 	,'16 - interest_bearing_products'::character varying				AS step_1
 	,'c - f_maintenance_contracts_bs'::character varying				AS step_2
-	,multiple_maintenance_contracts.budget_date
-	,date_part ('year', multiple_maintenance_contracts.budget_date )::integer	AS year                       
-	,date_part ('month', multiple_maintenance_contracts.budget_date )::integer	AS month
+	,cte_multiple_maintenance_contracts.budget_date
+	,date_part ('year', cte_multiple_maintenance_contracts.budget_date )::integer	AS year                       
+	,date_part ('month', cte_multiple_maintenance_contracts.budget_date )::integer	AS month
 
 
 -- BBAG STRUCTURE
-	,multiple_maintenance_contracts.country
+	,cte_multiple_maintenance_contracts.country
 	,'BU'::character varying						AS unit
 
 
 -- REPORT STRUCTURE
 ,NULL::integer				AS	line_id				
 ,NULL::character varying		AS	portfolio_concept 	
-	,multiple_maintenance_contracts.agaap_rprt
-	,multiple_maintenance_contracts.bdgt_agaap_1
-	,multiple_maintenance_contracts.bdgt_agaap_2
-	,multiple_maintenance_contracts.bdgt_agaap_3
-	,multiple_maintenance_contracts.product_group_desc
+	,cte_multiple_maintenance_contracts.agaap_rprt
+	,cte_multiple_maintenance_contracts.bdgt_agaap_1
+	,cte_multiple_maintenance_contracts.bdgt_agaap_2
+	,cte_multiple_maintenance_contracts.bdgt_agaap_3
+	,cte_multiple_maintenance_contracts.product_group_desc
 
-	,multiple_maintenance_contracts.product_code_desc 	
+	,cte_multiple_maintenance_contracts.product_code_desc 	
 	,NULL::character varying 						AS opex_capex_id_desc
-	,multiple_maintenance_contracts.gl
-	,multiple_maintenance_contracts.gl_number_desc
+	,cte_multiple_maintenance_contracts.gl
+	,cte_multiple_maintenance_contracts.gl_number_desc
 
 
 -- CONTRACT MAIN
 	,'Maintenance'::character varying 						AS dummy_contract
-	,multiple_maintenance_contracts.account_contract_number
-	,multiple_maintenance_contracts.module_code
-	,multiple_maintenance_contracts.product_code
-	,multiple_maintenance_contracts.start_date
-	,multiple_maintenance_contracts.maturity_date
+	,cte_multiple_maintenance_contracts.account_contract_number
+	,cte_multiple_maintenance_contracts.module_code
+	,cte_multiple_maintenance_contracts.product_code
+	,cte_multiple_maintenance_contracts.start_date
+	,cte_multiple_maintenance_contracts.maturity_date
 	,NULL::character varying						AS interest_date
 	,f_price_estimates.price_estimate					AS interest_nominal_rate
 	,NULL::character varying						AS collateral                                     
 	,'PRINCIPAL'::character varying						AS component
-	,multiple_maintenance_contracts.currency
-	,multiple_maintenance_contracts.principal				AS amount_lcy
+	,cte_multiple_maintenance_contracts.currency
+	,cte_multiple_maintenance_contracts.principal				AS amount_lcy
 
 
 -- CUSTOMER DATA
@@ -189,34 +220,33 @@ SELECT
 
 
 -- TABLE (LINE) VALUES
-	,multiple_maintenance_contracts.outstanding_principal			AS bs_thous_lcy
-	,multiple_maintenance_contracts.outstanding_principal*f_price_estimates.price_estimate/12
+	,cte_multiple_maintenance_contracts.outstanding_principal			AS bs_thous_lcy
+	,cte_multiple_maintenance_contracts.outstanding_principal*f_price_estimates.price_estimate/12
 										AS pnl_thous_lcy
  	,CASE
-		WHEN multiple_maintenance_contracts.start_budget_year = date_part ('year', multiple_maintenance_contracts.budget_date )::integer
-		THEN (date_part ('month', multiple_maintenance_contracts.budget_date )::integer - multiple_maintenance_contracts.start_budget_month + 1)*
-			multiple_maintenance_contracts.outstanding_principal*f_price_estimates.price_estimate/12
+		WHEN cte_multiple_maintenance_contracts.start_budget_year = date_part ('year', cte_multiple_maintenance_contracts.budget_date )::integer
+		THEN (date_part ('month', cte_multiple_maintenance_contracts.budget_date )::integer - cte_multiple_maintenance_contracts.start_budget_month + 1)*
+			cte_multiple_maintenance_contracts.outstanding_principal*f_price_estimates.price_estimate/12
 
-		ELSE (date_part ('month', multiple_maintenance_contracts.budget_date )::integer)*
-			multiple_maintenance_contracts.outstanding_principal*f_price_estimates.price_estimate/12
+		ELSE (date_part ('month', cte_multiple_maintenance_contracts.budget_date )::integer)*
+			cte_multiple_maintenance_contracts.outstanding_principal*f_price_estimates.price_estimate/12
 		END								AS pnl_ytd_thous_lcy
 
 
 
 FROM
-	multiple_maintenance_contracts
+	cte_multiple_maintenance_contracts
 
 
 LEFT JOIN
 		ctr_projection.f_price_estimates()	
 	ON		
-			f_price_estimates.country 		= multiple_maintenance_contracts.country
-		AND	f_price_estimates.bdgt_agaap_2	= multiple_maintenance_contracts.bdgt_agaap_2
+			f_price_estimates.country 		= cte_multiple_maintenance_contracts.country
+		AND	f_price_estimates.bdgt_agaap_2	= cte_multiple_maintenance_contracts.bdgt_agaap_2
 		AND	substring (f_price_estimates.product_code_desc, 1,position(' - ' in f_price_estimates.product_code_desc)-1)
-								= multiple_maintenance_contracts.product_code	
-		AND	f_price_estimates.year			= multiple_maintenance_contracts.start_budget_year	
-		AND	f_price_estimates.month			= multiple_maintenance_contracts.start_budget_month		
-
+								= cte_multiple_maintenance_contracts.product_code	
+		AND	f_price_estimates.year			= cte_multiple_maintenance_contracts.start_budget_year	
+		AND	f_price_estimates.month			= cte_multiple_maintenance_contracts.start_budget_month		
 
 
 
